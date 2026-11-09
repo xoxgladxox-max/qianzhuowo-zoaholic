@@ -384,6 +384,17 @@ def _clone_request_data_for_channel_attempt(request_data: Any) -> Any:
     # 目的：消除生产路径中的每次 inspect.signature 反射。
 
 
+def _callable_accepts_keyword(func: Callable, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True
+    return keyword in signature.parameters or any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+
+
 def normalize_keepalive_interval(keepalive_interval: Any, timeout_value: Any) -> Optional[int]:
     """把 keepalive_interval 规范化为可用于 SSE 心跳的正整数秒数。"""
     # 修改原因：keepalive_interval 来自配置库，可能缺失、为 0/负数、字符串，或大于请求超时。

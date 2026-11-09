@@ -156,6 +156,7 @@ async def patch_passthrough_claude_payload(
 
     # Fix: Opus 4.6 / 5.5 does not support assistant message prefill (conversation must end with a user message)
     # Merge a trailing assistant prefill into the preceding user message.
+    model_lower = str(payload.get("model") or getattr(request, "model", "") or "").lower()
     if isinstance(payload.get("messages"), list) and payload["messages"]:
         if any(k in model_lower for k in ("opus-5", "fable-5", "opus-4-6", "sonnet-4-6")):
             while payload["messages"] and payload["messages"][-1].get("role") == "assistant":

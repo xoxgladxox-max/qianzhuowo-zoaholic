@@ -30,6 +30,7 @@ async def assemble_stream_to_json(stream_generator):
     role = "assistant"
     content = ""
     reasoning_content = ""
+    refusal = None
     tool_calls_accum = {}  # index → {id, type, function: {name, arguments}}
     finish_reason = None
     prompt_tokens = 0
@@ -87,7 +88,7 @@ async def assemble_stream_to_json(stream_generator):
                         from .channels.openai_channel import flatten_reasoning_content
                         reasoning_content += flatten_reasoning_content(delta["reasoning_content"])
                     if "refusal" in delta and isinstance(delta["refusal"], str):
-                        if "refusal" not in locals() or refusal is None:
+                        if refusal is None:
                             refusal = ""
                         refusal += delta["refusal"]
 
@@ -142,7 +143,7 @@ async def assemble_stream_to_json(stream_generator):
         }
 
     # 组装 message
-    message = {"role": role, "refusal": refusal if 'refusal' in locals() else None}
+    message = {"role": role, "refusal": refusal}
     if tool_calls_accum:
         message["content"] = content if content else None
         message["tool_calls"] = [tool_calls_accum[i] for i in sorted(tool_calls_accum.keys())]
