@@ -154,6 +154,33 @@ async def patch_passthrough_claude_payload(
     else:
         payload["system"] = system_prompt_text
 
+    # Fix: Opus 4.6 / 5.5 does not support assistant message prefill (conversation must end with a user message)
+    # Merge a trailing assistant prefill into the preceding user message.
+    if isinstance(payload.get("messages"), list) and payload["messages"]:
+        if any(k in model_lower for k in ("opus-5", "fable-5", "opus-4-6", "sonnet-4-6")):
+            while payload["messages"] and payload["messages"][-1].get("role") == "assistant":
+                last_msg = payload["messages"].pop()
+                last_content = last_msg.get("content", "")
+                prefill_text = ""
+                if isinstance(last_content, str):
+                    prefill_text = last_content.strip()
+                elif isinstance(last_content, list):
+                    prefill_text = "".join(
+                        b.get("text", "") for b in last_content if isinstance(b, dict) and b.get("type") == "text"
+                    ).strip()
+                if prefill_text:
+                    note = f"\n\n{prefill_text}"
+                    if payload["messages"] and payload["messages"][-1].get("role") == "user":
+                        u_content = payload["messages"][-1].get("content")
+                        if isinstance(u_content, str):
+                            payload["messages"][-1]["content"] = u_content + note
+                        elif isinstance(u_content, list):
+                            u_content.append({"type": "text", "text": note})
+                    else:
+                        payload["messages"].append({"role": "user", "content": [{"type": "text", "text": note.strip()}]})
+            if not payload["messages"]:
+                payload["messages"].append({"role": "user", "content": [{"type": "text", "text": "Continue."}]})
+
     return payload
 
 
@@ -510,6 +537,39 @@ async def get_claude_payload(request, engine, provider, api_key=None):
 
     downgrade_tool_choice_for_thinking(payload)
 
+    # Adaptive-thinking Opus models also require auto/none tool choice.
+    tc_obj = payload.get("tool_choice")
+    if isinstance(tc_obj, dict) and tc_obj.get("type") in ("any", "tool"):
+        if payload.get("thinking") or any(k in original_model for k in ("opus-5", "fable-5", "opus-4-6", "sonnet-4-6")):
+            payload["tool_choice"] = {"type": "auto"}
+
+    # Merge trailing assistant prefill into the preceding user message.
+    if isinstance(payload.get("messages"), list) and payload["messages"]:
+        if any(k in original_model for k in ("opus-5", "fable-5", "opus-4-6", "sonnet-4-6")):
+            while payload["messages"] and payload["messages"][-1].get("role") == "assistant":
+                last_msg = payload["messages"].pop()
+                last_content = last_msg.get("content", "")
+                prefill_text = ""
+                if isinstance(last_content, str):
+                    prefill_text = last_content.strip()
+                elif isinstance(last_content, list):
+                    prefill_text = "".join(
+                        b.get("text", "") for b in last_content if isinstance(b, dict) and b.get("type") == "text"
+                    ).strip()
+                if prefill_text:
+                    note = f"\n\n{prefill_text}"
+                    if payload["messages"] and payload["messages"][-1].get("role") == "user":
+                        u_content = payload["messages"][-1].get("content")
+                        if isinstance(u_content, str):
+                            payload["messages"][-1]["content"] = u_content + note
+                        elif isinstance(u_content, list):
+                            u_content.append({"type": "text", "text": note})
+                    else:
+                        payload["messages"].append({"role": "user", "content": [{"type": "text", "text": note.strip()}]})
+            if not payload["messages"]:
+                payload["messages"].append({"role": "user", "content": [{"type": "text", "text": "Continue."}]})
+
+    payload.pop("parallel_tool_calls", None)
     return url, headers, payload
 
 
@@ -742,6 +802,10 @@ async def fetch_claude_response_stream(client, url, headers, payload, model, tim
 
                     # 处理 content_block_start 事件，记录当前块类型
                     event_type = resp.get("type", "")
+                    if event_type in ("ping", "message_start"):
+                        yield ": keepalive\n\n"
+                        if event_type == "ping":
+                            continue
                     if event_type == "content_block_start":
                         content_block = resp.get("content_block", {})
                         current_block_type = content_block.get("type", "")

@@ -273,73 +273,18 @@ export function ProviderList({
       {/* ── Filter Bar ── */}
       {!loading && totalListItemCount > 0 && (
         <div className="grid grid-cols-2 items-center gap-2 lg:flex lg:flex-wrap">
-          {/* 搜索框 */}
-          <div className="relative col-span-2 min-w-0 lg:flex-1 lg:min-w-48">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-            <input
-              type="text"
-              value={filterKeyword}
-              onChange={e => setFilterKeyword(e.target.value)}
-              placeholder="搜索渠道名、备注、模型名…"
-              className="w-full bg-background border border-border rounded-lg pl-9 pr-8 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary outline-none"
-            />
-            {filterKeyword && (
-              <button
-                onClick={() => setFilterKeyword('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                <XCircle className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-
-          {/* 引擎筛选 */}
-          <select
-            value={filterEngine}
-            onChange={e => setFilterEngine(e.target.value)}
-            className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground min-w-[120px]"
-          >
-            <option value="">全部引擎</option>
-            {availableEngines.map(eng => (
-              <option key={eng} value={eng}>{eng}</option>
-            ))}
-          </select>
-
-          {/* 分组筛选 */}
-          <select
-            value={filterGroup}
-            onChange={e => setFilterGroup(e.target.value)}
-            className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground min-w-[120px]"
-          >
-            <option value="">全部分组</option>
-            {availableGroups.map(g => (
-              <option key={g} value={g}>{g}</option>
-            ))}
-          </select>
-
-          {/* 状态筛选 */}
-          <select
-            value={filterStatus}
-            onChange={e => setFilterStatus(e.target.value as '' | 'enabled' | 'disabled')}
-            className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground min-w-[100px]"
-          >
-            <option value="">全部状态</option>
-            <option value="enabled">已启用</option>
-            <option value="disabled">已禁用</option>
-          </select>
-
-          {/* 淇濈暀鍗冪悽灞嬫帓搴忔柟寮忥紝骞跺姞鍏ヤ笂娓告壒閲忛€夋嫨銆?*/}
+          {/* 保留千琢屋排序方式，并加入上游批量选择。 */}
           <select
             value={sortMode}
             onChange={e => setSortMode(e.target.value as ProviderSortMode)}
             className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground min-w-[120px]"
-            title="鍒楄〃鎺掑簭鏂瑰紡"
+            title="列表排序方式"
           >
-            <option value="weight">鏉冮噸闄嶅簭</option>
-            <option value="enabled">鍚敤浼樺厛</option>
-            <option value="name">鍚嶇О</option>
+            <option value="weight">权重降序</option>
+            <option value="enabled">启用优先</option>
+            <option value="name">名称</option>
           </select>
-          <button id="provider-selection-toggle" type="button" disabled={batchBusy || !visibleNames.length} aria-pressed={selecting} onClick={() => { setSelecting(value => !value); setSelected(new Set()); }} className={`${batchButtonClass} text-muted-foreground ${selecting ? 'border-primary/40 bg-primary/5 text-primary' : ''}`}>{selecting ? '閫€鍑洪€夋嫨' : '閫夋嫨'}</button>
+          <button id="provider-selection-toggle" type="button" disabled={batchBusy || !visibleNames.length} aria-pressed={selecting} onClick={() => { setSelecting(value => !value); setSelected(new Set()); }} className={`${batchButtonClass} text-muted-foreground ${selecting ? 'border-primary/40 bg-primary/5 text-primary' : ''}`}>{selecting ? '退出选择' : '选择'}</button>
 
           {/* 清除筛选 */}
           {hasActiveFilters && (

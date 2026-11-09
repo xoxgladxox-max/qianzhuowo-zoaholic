@@ -804,11 +804,27 @@ async def process_request_passthrough(
                     from .stream_convert import convert_json_to_sse
 
                     async def force_non_stream_passthrough_iter():
-                        raw = b""
+                        # 本地修复：convert_json_to_sse 需要 dict，不能直接传 bytes。
+                        raw = bytearray()
                         async for chunk in wrapped_generator:
-                            raw += chunk if isinstance(chunk, bytes) else chunk.encode()
-                        async for sse_line in convert_json_to_sse(raw):
-                            yield sse_line
+                            if isinstance(chunk, (bytes, bytearray)):
+                                raw.extend(chunk)
+                            elif isinstance(chunk, str):
+                                raw.extend(chunk.encode("utf-8"))
+                            else:
+                                raw.extend(json_dumps_bytes(chunk))
+                        try:
+                            complete_response = json.loads(bytes(raw))
+                        except ValueError:
+                            yield bytes(raw).decode("utf-8", errors="replace")
+                            return
+                        finally:
+                            raw.clear()
+                        async for sse_line in convert_json_to_sse(complete_response, request.model):
+                            if isinstance(sse_line, dict):
+                                yield f"data: {json.dumps(sse_line, ensure_ascii=False)}\n\n"
+                            else:
+                                yield sse_line
 
                     response = LoggingStreamingResponse(
                         force_non_stream_passthrough_iter(),

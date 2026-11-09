@@ -20,12 +20,13 @@ from core.env import env_bool
 
 
 async def _ensure_workspace_enabled():
-    """閮ㄧ讲绾у紑鍏筹細ENABLE_WORKSPACE_API=false 鏃舵暣缁勬枃浠惰鍐欐帴鍙ｄ笉鍙敤銆?""
+    """Allow deployments to disable the workspace file API."""
     if not env_bool("ENABLE_WORKSPACE_API", True):
         raise HTTPException(status_code=404, detail="Workspace API is disabled on this deployment")
 
 
-# 宸ヤ綔鍖烘枃浠舵搷浣滃悓鏃跺彈閮ㄧ讲寮€鍏充笌绠＄悊鍛橀壌鏉冮檺鍒躲€?router = APIRouter(dependencies=[Depends(_ensure_workspace_enabled), Depends(verify_admin_api_key)])
+# Both the deployment switch and admin authentication are required.
+router = APIRouter(dependencies=[Depends(_ensure_workspace_enabled), Depends(verify_admin_api_key)])
 
 # ==================== 配置 ====================
 

@@ -470,7 +470,7 @@ async def fetch_gpt_response_stream(client, url, headers, payload, model, timeou
                         "type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{b64_pure}"}
                     }]
-                    sse_string = await generate_sse_response(timestamp, payload["model"], content=image_content_item)
+                    sse_string = await generate_sse_response(timestamp, payload.get("model", ""), content=image_content_item)
                     yield sse_string
                     continue
 
@@ -479,7 +479,7 @@ async def fetch_gpt_response_stream(client, url, headers, payload, model, timeou
                 if azure_databricks_claude_signature_content:
                     pass
                 elif azure_databricks_claude_summary_content:
-                    sse_string = await generate_sse_response(timestamp, payload["model"], reasoning_content=azure_databricks_claude_summary_content)
+                    sse_string = await generate_sse_response(timestamp, payload.get("model", ""), reasoning_content=azure_databricks_claude_summary_content)
                     yield sse_string
                 elif openrouter_reasoning:
                     if openrouter_reasoning.endswith("\\"):
@@ -500,7 +500,7 @@ async def fetch_gpt_response_stream(client, url, headers, payload, model, timeou
                     openrouter_reasoning = openrouter_reasoning.replace("\\n", "\n")
 
                     mark_content_start()
-                    sse_string = await generate_sse_response(timestamp, payload["model"], reasoning_content=openrouter_reasoning)
+                    sse_string = await generate_sse_response(timestamp, payload.get("model", ""), reasoning_content=openrouter_reasoning)
                     yield sse_string
                 elif no_stream_content:
                     mark_content_start()
@@ -581,7 +581,7 @@ async def fetch_gpt_response_stream(client, url, headers, payload, model, timeou
             cache_creation_tokens=cache_creation_tokens,
         )
         sse_string = await generate_sse_response(
-            timestamp, payload["model"], None, None, None, None, None,
+            timestamp, payload.get("model", ""), None, None, None, None, None,
             total_tokens=input_tokens + output_tokens,
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,

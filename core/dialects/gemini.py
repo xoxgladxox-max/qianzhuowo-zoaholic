@@ -147,9 +147,9 @@ async def parse_gemini_request(
 
             # 2. 处理函数调用 (Gemini native -> Canonical tool_calls)
             if "functionCall" in part:
-                fc = part["functionCall"]
+                fc = part["functionCall"] or {}
                 _fc_name = str(fc.get("name") or "")
-                tc_id = f"call_{_call_seq}"
+                tc_id = str(fc.get("id") or f"call_{_call_seq}")
                 _call_seq += 1
                 if part_signature:
                     tc_id = f"{tc_id}__thought__{part_signature}"
@@ -159,7 +159,7 @@ async def parse_gemini_request(
                     "id": tc_id,
                     "type": "function",
                     "function": {
-                        "name": fc.get("name"),
+                        "name": _fc_name,
                         "arguments": json_dumps_text(fc.get("args") or {}, ensure_ascii=False)
                     }
                 }
@@ -170,16 +170,13 @@ async def parse_gemini_request(
 
             # 3. 处理函数返回 (Gemini native -> Canonical tool role)
             if "functionResponse" in part:
-                fr = part["functionResponse"]
+                fr = part["functionResponse"] or {}
                 _fr_name = fr.get("name")
                 _fr_queue = _pending_call_ids.get(_fr_name) if _fr_name else None
                 if _fr_queue:
-                    # 并行同名调用按出现顺序逐个消费，保证 id 不重复。
                     _fr_call_id = _fr_queue.pop(0)
                 else:
-                    # 找不到对应 functionCall（旧历史或截断请求）时保留旧行为，
-                    # 用 name 兜底而不是直接崩溃。
-                    _fr_call_id = _fr_name
+                    _fr_call_id = str(fr.get("id") or _fr_name)
                 raw_resp = fr.get("response")
                 if isinstance(raw_resp, dict):
                     resp_dict = {
@@ -194,6 +191,20 @@ async def parse_gemini_request(
                     content=json_dumps_text(resp_dict, ensure_ascii=False),
                     tool_call_id=_fr_call_id
                 ))
+                continue
+
+            # 3.5 兼容 codeExecutionResult 与 executableCode 分片（防止酒馆预设或上游盲区分片在方言转换时丢失）
+            if "codeExecutionResult" in part and isinstance(part.get("codeExecutionResult"), dict):
+                cer_out = str(part["codeExecutionResult"].get("output") or "")
+                if cer_out:
+                    text_acc.append(cer_out)
+                    content_items.append(ContentItem(type="text", text=cer_out))
+                continue
+            if "executableCode" in part and isinstance(part.get("executableCode"), dict):
+                exe_code = str(part["executableCode"].get("code") or "")
+                if exe_code:
+                    text_acc.append(exe_code)
+                    content_items.append(ContentItem(type="text", text=exe_code))
                 continue
 
             # 4. 处理普通文本和图片
@@ -296,23 +307,26 @@ def _build_gemini_function_call_part(
     if not isinstance(fn, dict):
         return None
     fn_name = fn.get("name")
-    if not fn_name:
-        return None
     raw_args = fn.get("arguments")
+    if not fn_name and not (isinstance(raw_args, str) and raw_args):
+        return None
     if isinstance(raw_args, dict):
         args = raw_args
     elif isinstance(raw_args, str) and raw_args:
-        try:
-            parsed_args = json_loads(raw_args)
-            args = parsed_args if isinstance(parsed_args, dict) else {}
-        except json.JSONDecodeError:
-            args = {}
+        if fn_name:
+            try:
+                parsed_args = json_loads(raw_args)
+                args = parsed_args if isinstance(parsed_args, dict) else {"display_stream": raw_args}
+            except Exception:
+                args = {"display_stream": raw_args}
+        else:
+            args = {"display_stream": raw_args}
     else:
         args = {}
 
     part: Dict[str, Any] = {
         "functionCall": {
-            "name": fn_name,
+            "name": fn_name or "",
             "args": args,
         }
     }

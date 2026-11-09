@@ -653,6 +653,15 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
         request_messages = [Message(role="user", content=request.prompt)]
     else:
         request_messages = request.messages
+    # Pre-scan tool calls so cross-turn ids retain their function names.
+    for _m in request_messages:
+        if getattr(_m, "tool_calls", None):
+            for _tc in _m.tool_calls:
+                _fn = getattr(_tc, "function", None)
+                _fn_name = getattr(_fn, "name", None) if _fn else None
+                if _fn_name and getattr(_tc, "id", None):
+                    tool_call_name_map[_tc.id] = _fn_name
+    is_official_google = "googleapis.com" in str(provider.get("base_url", "")).lower()
     for msg in request_messages:
         role = msg.role
         if role == "assistant":
@@ -765,15 +774,13 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                     fc_name = pending_fc_names.pop(0)
                 else:
                     fc_name = msg.tool_call_id or "unknown_function"
-            # Google AI Studio API 要求函数响应的角色为 "user"
-            # 它将函数执行结果视为由用户/环境提供的上下文
-            # 修改原因：OpenAI 格式里每个 tool 响应是独立消息，但 Gemini 要求同一 function call turn 的全部响应合并在一个 user turn 的 parts 里。
-            # 修改方式：上一条输出已是 functionResponse 的 user 回合时直接追加 part，否则才新开回合。
-            # 目的：并行工具调用产生的多个响应共享同一 turn，满足上游 response/call parts 数量一致的校验。
+            # Third-party relays also require response.name; Google uses the native shape.
+            tool_result = extract_tool_result_text(msg.content)
+            resp_dict = {"result": tool_result} if is_official_google else {"name": fc_name, "result": tool_result}
             fr_part = {
                 "functionResponse": {
                     "name": fc_name,
-                    "response": {"result": extract_tool_result_text(msg.content)}
+                    "response": resp_dict
                 }
             }
             if messages and messages[-1].get("role") == "user" and any("functionResponse" in p for p in messages[-1].get("parts", [])):

@@ -354,7 +354,14 @@ def _inject_auto_cache(payload: Dict[str, Any], ttl: str) -> None:
     cc = {"type": "ephemeral"}
     if ttl == "1h":
         cc["ttl"] = "1h"
-    payload["cache_control"] = cc
+    # 1. 固定锚点：在 system 最后一个非空文本块打上 cache_control，确保跨会话/压缩后 system+tools 固定命中
+    system = payload.get("system")
+    if isinstance(system, list) and system:
+        last_sys = system[-1]
+        if isinstance(last_sys, dict) and last_sys.get("type") == "text" and last_sys.get("text"):
+            last_sys["cache_control"] = dict(cc)
+    # 2. 滚动锚点：顶层 cache_control，Anthropic 自动将断点挂在最后一块可缓存消息并随轮次前移
+    payload["cache_control"] = dict(cc)
     logger.debug(f"[claude_tools] Injected auto cache_control: {cc}")
 
 
@@ -436,6 +443,8 @@ async def claude_tools_request_interceptor(
     # ── 2. 解析后缀 ──
     base_model, features, thinking_budget = parse_model_suffixes(model)
     if not features:
+        # 修复：无后缀模型（如 claude-opus-5-5）也必须执行自动 prompt caching 注入
+        _inject_auto_cache(payload, provider)
         return url, headers, payload
 
     logger.info(f"[claude_tools] model={model}, features={features}, engine={engine}")
