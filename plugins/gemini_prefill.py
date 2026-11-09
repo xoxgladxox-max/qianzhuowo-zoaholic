@@ -1566,6 +1566,10 @@ def apply_uuau_tunnel(
             t_cfg = gen_cfg.setdefault("thinkingConfig", {})
             if isinstance(t_cfg, dict):
                 t_cfg["includeThoughts"] = True
+                if wants_thinking and options.thinking in THINKING_LEVELS:
+                    t_cfg["thinkingLevel"] = THINKING_LEVELS[options.thinking]
+                elif not wants_thinking and "thinkingLevel" not in t_cfg and "thinkingBudget" not in t_cfg:
+                    t_cfg["thinkingLevel"] = "LOW"
         elif use_system_tail:
             # 报告第 2.3 章：无 M 预填时，Vertex 末尾 S({"text": " "}) 单空格压制 E3
             new_contents.append({
@@ -1639,13 +1643,6 @@ def apply_uuau_tunnel(
         if allow_partial_args:
             fcc_cfg["streamFunctionCallArguments"] = True
         payload["toolConfig"] = {"functionCallingConfig": fcc_cfg}
-    elif has_real_client_tools:
-        payload.pop("tool_config", None)
-        if not is_waa:
-            fcc_cfg = {"mode": "VALIDATED"}
-            if allow_partial_args:
-                fcc_cfg["streamFunctionCallArguments"] = True
-            payload["toolConfig"] = {"functionCallingConfig": fcc_cfg}
     return True
 
 def build_folded_contents(scan: PrefillScan, extra: str = "") -> List[Dict[str, Any]]:
