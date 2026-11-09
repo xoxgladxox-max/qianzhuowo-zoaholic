@@ -20,18 +20,12 @@ from core.env import env_bool
 
 
 async def _ensure_workspace_enabled():
-    """部署级开关：ENABLE_WORKSPACE_API=false 时整组文件读写接口不可用。
-
-    修改原因：workspace 提供服务器文件读写，属于认证被绕过即全盘皮书的位置。
-    修改方式：保持默认启用（兼容现有控制台），允许通过环境变量在不需要此
-    能力的部署上彻底关闭，关闭后返回 404。
-    目的：缩小高权限攻击面。
-    """
+    """閮ㄧ讲绾у紑鍏筹細ENABLE_WORKSPACE_API=false 鏃舵暣缁勬枃浠惰鍐欐帴鍙ｄ笉鍙敤銆?""
     if not env_bool("ENABLE_WORKSPACE_API", True):
         raise HTTPException(status_code=404, detail="Workspace API is disabled on this deployment")
 
 
-router = APIRouter(dependencies=[Depends(_ensure_workspace_enabled)])
+# 宸ヤ綔鍖烘枃浠舵搷浣滃悓鏃跺彈閮ㄧ讲寮€鍏充笌绠＄悊鍛橀壌鏉冮檺鍒躲€?router = APIRouter(dependencies=[Depends(_ensure_workspace_enabled), Depends(verify_admin_api_key)])
 
 # ==================== 配置 ====================
 
@@ -319,6 +313,29 @@ async def workspace_write(
     if len(content_bytes) > MAX_WRITE_SIZE:
         raise HTTPException(status_code=413, detail=f"内容过大，最大允许 {MAX_WRITE_SIZE // 1024 // 1024}MB")
 
+    if normalized == "api.yaml":
+        from utils import yaml as _yaml_loader
+        try:
+            parsed_yaml = _yaml_loader.load(body.content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"api.yaml YAML 语法解析失败: {e}")
+        if not isinstance(parsed_yaml, dict) or not isinstance(parsed_yaml.get("providers"), list):
+            raise HTTPException(status_code=400, detail="api.yaml 必须包含 providers 列表")
+        if abs_path.exists():
+            try:
+                old_yaml = _yaml_loader.load(abs_path.read_text(encoding="utf-8")) or {}
+                old_p_len = len(old_yaml.get("providers") or []) if isinstance(old_yaml, dict) else 0
+                new_p_len = len(parsed_yaml.get("providers") or [])
+                if old_p_len > 5 and new_p_len < old_p_len - 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"拒绝直接覆写 api.yaml：渠道数量从 {old_p_len} 骤降至 {new_p_len}",
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+
     # 备份原文件（如果存在）
     backup_content = None
     if abs_path.exists():
@@ -356,6 +373,9 @@ async def workspace_delete(
         raise HTTPException(status_code=404, detail="文件不存在")
     if abs_path.is_dir():
         raise HTTPException(status_code=400, detail="不能通过此接口删除目录")
+    _protected_names = {"api.yaml", "oauth_state.json", "stats.db", "zoaholic.db", "one-api.db", "oauth.db", "logs.db"}
+    if abs_path.name in _protected_names or abs_path.suffix.lower() == ".db" or ".bak" in abs_path.name:
+        raise HTTPException(status_code=403, detail=f"受保护的核心配置/凭据/数据库文件禁止删除: '{normalized}'")
 
     try:
         abs_path.unlink()

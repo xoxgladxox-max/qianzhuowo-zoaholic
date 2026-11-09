@@ -53,6 +53,7 @@ DEFAULT_TIMEOUT = int(os.getenv("TIMEOUT", 600))
 # 修改方式：为 keepalive_interval 提供可环境变量覆盖的合理默认值，配置文件仍可按全局/渠道/模型覆盖。
 # 目的：默认每 15 秒向下游发送 SSE 注释帧，避免客户端或中间代理因空闲无字节而断开。
 DEFAULT_KEEPALIVE_INTERVAL = int(os.getenv("KEEPALIVE_INTERVAL", 15))
+DEFAULT_STREAM_HEADER_TIMEOUT = int(os.getenv("STREAM_HEADER_TIMEOUT", 60))
 # DEBUG 环境变量支持 true/false/1/0/yes/no
 is_debug = env_bool("DEBUG", False)
 # API 文档（/docs /redoc /openapi.json /docs/markdown）默认关闭，需显式开启
@@ -68,33 +69,43 @@ except Exception:
     VERSION = 'unknown'
 logger.info("VERSION: %s", VERSION)
 
-def init_preference(all_config, preference_key, default_timeout=DEFAULT_TIMEOUT):
-    # 存储超时配置
-    # 修改原因：旧逻辑在 preferences 为空或未声明某项偏好时，会让 global 默认值变成空 dict，
-    # 后续调用方若传入兜底值就可能覆盖启动期 default_timeout（keepalive 因此默认落到 99999 并被禁用）。
-    # 修改方式：先写入 default_timeout，再叠加配置文件中的全局/模型级覆盖。
-    # 目的：让 model_timeout、keepalive_interval 等偏好都稳定遵守启动期默认值，同时保留现有覆盖语义。
+def init_preference(all_config, preference_key, default_timeout=DEFAULT_TIMEOUT, alias_keys=()):
+    # 存储超时配置（支持全局与单渠道覆盖，兼容直接填数值或按模型名的字典，以及别名键如 header_timeout）
     preference_dict = {"default": default_timeout}
     preferences = safe_get(all_config, "preferences", default={})
     providers = safe_get(all_config, "providers", default=[])
-    if preferences:
-        if isinstance(preferences.get(preference_key), int):
-            preference_dict["default"] = preferences.get(preference_key)
-        else:
-            preference_settings = preferences.get(preference_key, {}) or {}
-            for model_name, timeout_value in preference_settings.items():
+    keys_to_check = (preference_key,) + tuple(alias_keys or ())
+    if isinstance(preferences, dict) and preferences:
+        raw_global = None
+        for k in keys_to_check:
+            if preferences.get(k) is not None:
+                raw_global = preferences.get(k)
+                break
+        if isinstance(raw_global, (int, float)) and not isinstance(raw_global, bool):
+            preference_dict["default"] = raw_global
+        elif isinstance(raw_global, dict):
+            for model_name, timeout_value in raw_global.items():
                 preference_dict[model_name] = timeout_value
 
     result = defaultdict(lambda: defaultdict(lambda: default_timeout))
     for provider in providers:
-        provider_preference_settings = safe_get(provider, "preferences", preference_key, default={})
-        if provider_preference_settings:
-            for model_name, timeout_value in provider_preference_settings.items():
-                result[provider['provider']][model_name] = timeout_value
+        if not isinstance(provider, dict) or "provider" not in provider:
+            continue
+        prov_prefs = safe_get(provider, "preferences", default={})
+        if not isinstance(prov_prefs, dict):
+            continue
+        raw_prov = None
+        for k in keys_to_check:
+            if prov_prefs.get(k) is not None:
+                raw_prov = prov_prefs.get(k)
+                break
+        if isinstance(raw_prov, (int, float)) and not isinstance(raw_prov, bool):
+            result[provider["provider"]]["default"] = raw_prov
+        elif isinstance(raw_prov, dict):
+            for model_name, timeout_value in raw_prov.items():
+                result[provider["provider"]][model_name] = timeout_value
 
     result["global"] = preference_dict
-    # print("result", json.dumps(result, indent=4))
-
     return result
 
 # ---- 数据库压缩闸门 ----
@@ -395,8 +406,12 @@ async def cleanup_expired_raw_data():
                             if not db_path:
                                 db_path = "data/stats.db"
                             async with aiosqlite.connect(db_path) as vacuum_conn:
-                                # 每次回收最多 2000 页（约 8MB），轻量不阻塞
-                                await vacuum_conn.execute("PRAGMA incremental_vacuum(2000)")
+                                # 必须 fetchall() 消费游标，否则 SQLite 只会 step 1 页（4KB）就停下；
+                                # 每次最多回收 50000 页（约 200MB）并附带一次非阻塞 PASSIVE checkpoint。
+                                async with vacuum_conn.execute("PRAGMA incremental_vacuum(50000)") as cur:
+                                    await cur.fetchall()
+                                async with vacuum_conn.execute("PRAGMA wal_checkpoint(PASSIVE)") as cur:
+                                    await cur.fetchall()
                                 logger.info("SQLite incremental_vacuum completed after raw data cleanup")
                         except Exception as ve:
                             logger.warning(f"SQLite incremental_vacuum failed (non-critical): {ve}")
@@ -705,6 +720,9 @@ async def lifespan(app: FastAPI):
 
         app.state.provider_timeouts = init_preference(app.state.config, "model_timeout", DEFAULT_TIMEOUT)
         app.state.keepalive_interval = init_preference(app.state.config, "keepalive_interval", DEFAULT_KEEPALIVE_INTERVAL)
+        app.state.stream_header_timeouts = init_preference(
+            app.state.config, "stream_header_timeout", DEFAULT_STREAM_HEADER_TIMEOUT, alias_keys=("header_timeout",)
+        )
         # 初始化 models_list（用于存储从其他 API Key 引用的模型列表）
         app.state.models_list = {}
         # pprint(dict(app.state.provider_timeouts))
@@ -871,6 +889,15 @@ async def lifespan(app: FastAPI):
         import ctypes
         _libc = ctypes.CDLL("libc.so.6")
         _has_malloc_trim = hasattr(_libc, 'malloc_trim')
+        if _has_malloc_trim:
+            _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            _libc.malloc_trim.restype = ctypes.c_int
+        if hasattr(_libc, 'mallopt'):
+            _libc.mallopt.argtypes = [ctypes.c_int, ctypes.c_int]
+            _libc.mallopt.restype = ctypes.c_int
+            _libc.mallopt(-3, 131072)  # M_MMAP_THRESHOLD = 128 KB (disable dynamic 32MB bump)
+            _libc.mallopt(-1, 131072)  # M_TRIM_THRESHOLD = 128 KB
+            _libc.mallopt(-8, 2)       # M_ARENA_MAX = 2
     except Exception:
         _libc = None
         _has_malloc_trim = False
@@ -882,27 +909,32 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(300)  # 5 分钟
             tick += 1
 
+            # 当 RSS >= 450MB 或每 15 分钟（3 个 tick）或凌晨 4 点时，先做 gc.collect() 回收循环引用，再做 malloc_trim(0)
+            now = datetime.now(timezone(timedelta(hours=8)))  # CST
+            rss_mb = 0
+            try:
+                with open("/proc/self/statm", "r") as _sf:
+                    rss_mb = (int(_sf.read().split()[1]) * 4096) // (1024 * 1024)
+            except Exception:
+                pass
+            if rss_mb >= 450 or tick % 3 == 0 or (now.hour == 4 and now.minute < 5):
+                try:
+                    before = gc.get_count()
+                    collected = gc.collect()
+                    after = gc.get_count()
+                    if collected > 0 or (now.hour == 4 and now.minute < 5):
+                        logger.info(f"[memory_maintenance] gc.collect() done (rss={rss_mb}MB): freed {collected} objects, counts {before} -> {after}")
+                except Exception as e:
+                    logger.warning(f"[memory_maintenance] gc.collect() failed: {e}")
+
             # malloc_trim 每轮都做
             if _has_malloc_trim:
                 try:
                     _libc.malloc_trim(0)
                     if tick % 12 == 1:  # 每小时日志一次
-                        logger.info("[memory_maintenance] malloc_trim(0) executed")
+                        logger.info(f"[memory_maintenance] malloc_trim(0) executed (rss={rss_mb}MB)")
                 except Exception as e:
                     logger.warning(f"[memory_maintenance] malloc_trim failed: {e}")
-
-            # 凌晨 4 点做一次 gen2 GC
-            now = datetime.now(timezone(timedelta(hours=8)))  # CST
-            if now.hour == 4 and now.minute < 5:
-                try:
-                    before = gc.get_count()
-                    collected = gc.collect()
-                    after = gc.get_count()
-                    logger.info(f"[memory_maintenance] gen2 collect done: freed {collected} objects, counts {before} -> {after}")
-                    if _has_malloc_trim:
-                        _libc.malloc_trim(0)
-                except Exception as e:
-                    logger.warning(f"[memory_maintenance] gc.collect() failed: {e}")
 
     asyncio.get_running_loop().create_task(memory_maintenance())
 
