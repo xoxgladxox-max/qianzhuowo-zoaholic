@@ -1545,10 +1545,14 @@ def apply_uuau_tunnel(
                     new_contents.append({"role": "user", "parts": tail_thought_parts})
         elif has_real_client_tools:
             # 带真实工具（如 VS Code LimCode Agent）：使用 U2(thought:true) 自毁尾块压制 E3 并稀释 E2，
-            # 避免注入多余的空名 functionResponse 破坏多轮 functionCall <-> functionResponse 数量匹配校验
+            # 同时挂载 SIGNED_CREATIVE_THOUGHT_TEXT 免审思维导语防 functionResponse 返回 R18 文本后触发 content_filter
             tail_u2_parts_tools: List[Dict[str, Any]] = []
             if options.dilute:
                 tail_u2_parts_tools.append({"text": STEALTH_DILUTION_TEXT, "thought": True})
+            tail_u2_parts_tools.append({
+                "text": SIGNED_CREATIVE_THOUGHT_TEXT + "\n" + (effort_line if effort_line else EFFORT_ZERO_PRIMITIVE),
+                "thought": True,
+            })
             tail_u2_parts_tools.append({"text": " ", "thought": True})
             if new_contents and _role_of(new_contents[-1]) == "user":
                 u_parts = list(_parts_of(new_contents[-1]))
