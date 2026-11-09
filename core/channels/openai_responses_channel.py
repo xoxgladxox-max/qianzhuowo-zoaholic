@@ -115,9 +115,7 @@ async def get_responses_payload(request, engine, provider, api_key=None):
     input_items = []
     instructions_list = []
 
-    messages = list(request.messages)
-
-    for msg in messages:
+    for msg in request.messages:
         role = msg.role
         tool_calls = msg.tool_calls
         tool_call_id = msg.tool_call_id
@@ -135,71 +133,73 @@ async def get_responses_payload(request, engine, provider, api_key=None):
             else:
                 # content 可能是 str 或 list[ContentPart]，统一提取文本
                 if isinstance(content, list):
-                    text_parts = [getattr(item, 'text', '') or '' for item in content if getattr(item, 'type', None) == 'text']
+                    text_parts = [item.text if item.text is not None else "" for item in content if item.type == "text"]
                     instructions_list.append("\n".join(text_parts))
                 else:
                     instructions_list.append(content or "")
                 continue
 
+        # tool result -> function_call_output（顶层 item）
+        if role == "tool" or tool_call_id:
+            from .openai_channel import serialize_tool_message_content
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": tool_call_id or msg.name or "call_0",
+                "output": serialize_tool_message_content(content),
+            })
+            continue
+
         # content(list) -> message(content=[input_text/input_image...])
         if isinstance(content, list):
             content_items = []
             for item in content:
-                if getattr(item, "type", None) == "text":
-                    content_items.append(format_text_item(item.text, role))
-                elif getattr(item, "type", None) == "image_url" and provider.get("image", True):
+                if item.type in ("text", "input_text", "output_text", "summary_text"):
+                    content_items.append(format_text_item(item.text if item.text is not None else "", role))
+                elif item.type == "image_url" and provider.get("image", True):
                     image_item = await format_input_image(item.image_url.url)
                     content_items.append(image_item)
-                elif getattr(item, "type", None) == "file":
-                    if getattr(item.file, "url", None) and item.file.url.startswith("data:image/"):
-                        image_item = await format_input_image(item.file.url)
+                elif item.type == "file" and item.file is not None:
+                    item_file = item.file
+                    if item_file.url and item_file.url.startswith("data:image/"):
+                        image_item = await format_input_image(item_file.url)
                         content_items.append(image_item)
-                    elif getattr(item.file, "data", None) and str(item.file.mime_type).startswith("image/"):
-                        image_item = await format_input_image(f"data:{item.file.mime_type};base64,{item.file.data}")
+                    elif item_file.data and str(item_file.mime_type).startswith("image/"):
+                        image_item = await format_input_image(f"data:{item_file.mime_type};base64,{item_file.data}")
                         content_items.append(image_item)
                     else:
                         file_item = {"type": "input_file"}
-                        if getattr(item.file, "filename", None):
-                            file_item["filename"] = item.file.filename
-                        if getattr(item.file, "file_id", None):
-                            file_item["file_id"] = item.file.file_id
-                        elif getattr(item.file, "url", None):
-                            if item.file.url.startswith("http"):
-                                file_item["file_url"] = item.file.url
+                        if item_file.filename:
+                            file_item["filename"] = item_file.filename
+                        if item_file.file_id:
+                            file_item["file_id"] = item_file.file_id
+                        elif item_file.url:
+                            if item_file.url.startswith("http"):
+                                file_item["file_url"] = item_file.url
                             else:
-                                file_item["file_data"] = item.file.url
-                        elif getattr(item.file, "data", None):
-                            file_item["file_data"] = f"data:{item.file.mime_type or 'application/octet-stream'};base64,{item.file.data}"
+                                file_item["file_data"] = item_file.url
+                        elif item_file.data:
+                            file_item["file_data"] = f"data:{item_file.mime_type or 'application/octet-stream'};base64,{item_file.data}"
                         content_items.append(file_item)
             if content_items:
                 input_items.append({"type": "message", "role": role, "content": content_items})
-
-        # tool result -> function_call_output（顶层 item）
-        elif tool_call_id:
-            input_items.append({
-                "type": "function_call_output",
-                "call_id": tool_call_id,
-                "output": content or "",
-            })
-
         else:
-            # 文本消息
-            if content or role == "assistant":
+            # 文本消息（当存在 tool_calls 且无文本内容时，避免生成空 assistant 文本块）
+            if content or (role == "assistant" and not tool_calls):
                 input_items.append({
                     "type": "message",
                     "role": role,
                     "content": [format_text_item(content or "", role)],
                 })
 
-            # tool_calls -> function_call（顶层 item）
-            if tool_calls:
-                for tool_call in tool_calls:
-                    input_items.append({
-                        "type": "function_call",
-                        "call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments,
-                    })
+        # tool_calls -> function_call（顶层 item，兼容列表 content 与字符串 content）
+        if tool_calls:
+            for tool_call in tool_calls:
+                input_items.append({
+                    "type": "function_call",
+                    "call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                })
 
     # 构建 payload
     payload = {
@@ -373,7 +373,7 @@ async def get_responses_payload(request, engine, provider, api_key=None):
 
 async def fetch_responses_response(client, url, headers, payload, model, timeout):
     """处理 Responses API 的非流式响应"""
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
 
     error_message = await check_response(response, "fetch_responses_response")
@@ -382,7 +382,7 @@ async def fetch_responses_response(client, url, headers, payload, model, timeout
         return
 
     response_bytes = await response.aread()
-    response_json = await asyncio.to_thread(json_loads, response_bytes)
+    response_json = json_loads(response_bytes)
 
     error = extract_stream_error(response_json)
     if error:
@@ -826,7 +826,7 @@ async def _responses_events_to_sse(events, model):
 
 async def fetch_responses_stream(client, url, headers, payload, model, timeout):
     """处理 Responses API 的流式响应（HTTP SSE 传输）"""
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
 
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=timeout) as response:
         error_message = await check_response(response, "fetch_responses_stream")

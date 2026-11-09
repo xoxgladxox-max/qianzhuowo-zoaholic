@@ -11,7 +11,7 @@ import asyncio
 from datetime import datetime
 from uuid import uuid4
 
-from ..models import Message
+from ..models import Message, ImageGenerationRequest
 from ..utils import (
     safe_get,
     get_model_dict,
@@ -409,7 +409,25 @@ def process_tool_parameters(data):
         process_tool_parameters(items)
 
 
-def _extract_tool_result_text(content) -> str:
+def extract_tool_call_signature(tc) -> str | None:
+    """从 ToolCall 的 extra_content、扩展属性或 id(__thought__ 编码) 中提取 thoughtSignature。"""
+    extra = tc.model_extra.get("extra_content")
+    google_extra = extra.get("google") if isinstance(extra, dict) else None
+    if isinstance(google_extra, dict):
+        for key in ("thoughtSignature", "thought_signature", "signature"):
+            val = google_extra.get(key)
+            if val:
+                return val
+    for key in ("thoughtSignature", "thought_signature"):
+        val = tc.model_extra.get(key)
+        if val:
+            return val
+    if "__thought__" in tc.id:
+        return tc.id.split("__thought__", 1)[1]
+    return None
+
+
+def extract_tool_result_text(content) -> str:
     """将 OpenAI tool 消息的 content (str | list[ContentItem] | None) 归一化为纯文本。"""
     if content is None:
         return ""
@@ -418,31 +436,31 @@ def _extract_tool_result_text(content) -> str:
     if isinstance(content, list):
         parts = []
         for item in content:
-            if isinstance(item, dict):
-                if item.get("text"):
-                    parts.append(str(item["text"]))
-            elif hasattr(item, "text") and item.text:
-                parts.append(str(item.text))
+            text = item.get("text") if isinstance(item, dict) else item.text
+            if text:
+                parts.append(str(text))
         return "\n".join(parts)
     return str(content)
 
 
 def apply_gemini_response_format(request, generation_config: dict) -> None:
     """将 OpenAI response_format (json_object / json_schema) 转换为 Gemini generationConfig 字段。"""
-    resp_fmt = getattr(request, "response_format", None)
+    if isinstance(request, ImageGenerationRequest):
+        return
+    resp_fmt = request.response_format
     if not resp_fmt:
         return
-    fmt_type = resp_fmt.get("type") if isinstance(resp_fmt, dict) else getattr(resp_fmt, "type", None)
+    fmt_type = resp_fmt.get("type") if isinstance(resp_fmt, dict) else resp_fmt.type
     if fmt_type == "json_object":
         generation_config["responseMimeType"] = "application/json"
     elif fmt_type == "json_schema":
         generation_config["responseMimeType"] = "application/json"
-        js_obj = resp_fmt.get("json_schema") if isinstance(resp_fmt, dict) else getattr(resp_fmt, "json_schema", None)
+        js_obj = resp_fmt.get("json_schema") if isinstance(resp_fmt, dict) else resp_fmt.json_schema
         raw_schema = None
         if isinstance(js_obj, dict):
             raw_schema = js_obj.get("schema")
         elif js_obj is not None:
-            raw_schema = getattr(js_obj, "schema", None)
+            raw_schema = js_obj.schema
         if isinstance(raw_schema, dict) and raw_schema:
             schema_copy = copy.deepcopy(raw_schema)
             inline_schema_refs(schema_copy)
@@ -631,31 +649,33 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
     pending_fc_names = []
     seen_non_system = False
 
-    try:
+    if isinstance(request, ImageGenerationRequest):
         request_messages = [Message(role="user", content=request.prompt)]
-    except Exception:
-        request_messages = copy.deepcopy(request.messages)
+    else:
+        request_messages = request.messages
     for msg in request_messages:
-        if msg.role == "assistant":
-            msg.role = "model"
-        elif msg.role in ("system", "developer"):
+        role = msg.role
+        if role == "assistant":
+            role = "model"
+        elif role in ("system", "developer"):
             if seen_non_system:
-                msg.role = "user"
+                role = "user"
             else:
-                msg.role = "system"
-        if msg.role != "system":
+                role = "system"
+        if role != "system":
             seen_non_system = True
         
         parts = []
         # 提取该消息可能携带的签名（兼容 thoughtSignature / thought_signature / signature）
+        msg_extra = msg.model_extra or {}
         msg_signature = (
-            getattr(msg, "thoughtSignature", None)
-            or getattr(msg, "thought_signature", None)
-            or getattr(msg, "signature", None)
+            msg_extra.get("thoughtSignature")
+            or msg_extra.get("thought_signature")
+            or msg_extra.get("signature")
         )
 
         # 1. 处理思维链
-        reasoning = getattr(msg, "reasoning_content", None)
+        reasoning = msg_extra.get("reasoning_content")
         if reasoning:
             parts.append({"thought": True, "text": reasoning})
 
@@ -666,15 +686,15 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                     parts.append(format_text_message(item.text))
                 elif item.type == "image_url" and provider.get("image", True):
                     parts.append(await format_image_message(item.image_url.url))
-                elif item.type == "file":
-                    if getattr(item.file, "file_uri", None):
+                elif item.type == "file" and item.file is not None:
+                    if item.file.file_uri:
                         parts.append({
                             "fileData": {
                                 "mimeType": item.file.mime_type or "application/octet-stream",
                                 "fileUri": item.file.file_uri
                             }
                         })
-                    elif getattr(item.file, "url", None):
+                    elif item.file.url:
                         from ..file_utils import get_base64_file, parse_data_uri
                         data_uri, mime_type = await get_base64_file(item.file.url)
                         if data_uri.startswith("data:"):
@@ -687,7 +707,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                                 "data": b64_data
                             }
                         })
-                    elif getattr(item.file, "data", None):
+                    elif item.file.data:
                         parts.append({
                             "inlineData": {
                                 "mimeType": item.file.mime_type or "application/octet-stream",
@@ -698,7 +718,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
             parts.append({"text": msg.content})
 
         # 3. 处理工具调用 (Model 角色下)
-        if msg.role == "model" and msg.tool_calls:
+        if role == "model" and msg.tool_calls:
             for i, tc in enumerate(msg.tool_calls):
                 # 转换 arguments
                 try:
@@ -714,18 +734,11 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                         "args": args
                     }
                 }
-                if getattr(tc, "id", None):
+                if tc.id:
                     tool_call_name_map[tc.id] = tc.function.name
                 pending_fc_names.append(tc.function.name)
-                # 签名逻辑：第一个 FC 必须携带签名（兼容 thoughtSignature / thought_signature / signature）
-                _ec_google = (getattr(tc, "extra_content", {}) or {}).get("google", {}) or {}
-                sig = (
-                    _ec_google.get("thoughtSignature")
-                    or _ec_google.get("thought_signature")
-                    or _ec_google.get("signature")
-                    or getattr(tc, "thoughtSignature", None)
-                    or getattr(tc, "thought_signature", None)
-                )
+                # 签名逻辑：第一个 FC 必须携带签名（兼容 thoughtSignature / thought_signature / signature 及 __thought__ 编码）
+                sig = extract_tool_call_signature(tc)
                 if not sig and i == 0:
                     sig = msg_signature or "skip_thought_signature_validator"
                 
@@ -741,7 +754,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
             parts[-1]["thoughtSignature"] = msg_signature
 
         # 5. 处理函数响应 (Tool 角色下)
-        if msg.role == "tool":
+        if role == "tool":
             fc_name = None
             if msg.tool_call_id:
                 fc_name = tool_call_name_map.get(msg.tool_call_id)
@@ -760,7 +773,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
             fr_part = {
                 "functionResponse": {
                     "name": fc_name,
-                    "response": {"result": _extract_tool_result_text(msg.content)}
+                    "response": {"result": extract_tool_result_text(msg.content)}
                 }
             }
             if messages and messages[-1].get("role") == "user" and any("functionResponse" in p for p in messages[-1].get("parts", [])):
@@ -770,9 +783,9 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                     "role": "user",
                     "parts": [fr_part]
                 })
-        elif msg.role != "system" and parts:
-            messages.append({"role": msg.role, "parts": parts})
-        elif msg.role == "system":
+        elif role != "system" and parts:
+            messages.append({"role": role, "parts": parts})
+        elif role == "system":
             # 系统提示词处理逻辑保持不变（不再将连续下划线压缩为单下划线）
             sys_text = "".join([p.get("text", "") for p in parts if "text" in p])
             if sys_text:
@@ -843,8 +856,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                 processed_tools = []
                 original_tools = request.tools or []
                 for tool_idx, tool in enumerate(value):
-                    # 深度克隆以避免修改原始请求对象
-                    function_def = copy.deepcopy(tool["function"])
+                    function_def = tool["function"]
                     # 移除 OpenAI 特有的 strict 字段
                     function_def.pop("strict", None)
                     
@@ -856,9 +868,8 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                             if isinstance(orig, dict):
                                 orig_params = (orig.get("function") or {}).get("parameters") or {}
                                 extra_defs = orig_params.get("$defs") or orig_params.get("defs")
-                            else:
-                                orig_params = getattr(getattr(orig, "function", None), "parameters", None)
-                                extra_defs = getattr(orig_params, "defs", None) if orig_params is not None else None
+                            elif orig.function and orig.function.parameters:
+                                extra_defs = orig.function.parameters.defs
                         inline_schema_refs(function_def["parameters"], extra_defs)
                         process_tool_parameters(function_def["parameters"])
 
@@ -880,7 +891,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                             if fn_name:
                                 tool_config["function_calling_config"]["mode"] = "ANY"
                                 tool_config["function_calling_config"]["allowed_function_names"] = [fn_name]
-                        elif hasattr(tc, "type") and tc.type == "function" and tc.function:
+                        elif not isinstance(tc, (str, dict)) and tc.type == "function" and tc.function:
                             fn_name = tc.function.name
                             tool_config["function_calling_config"]["mode"] = "ANY"
                             tool_config["function_calling_config"]["allowed_function_names"] = [fn_name]
@@ -909,7 +920,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
     # OpenAI stop -> Gemini generationConfig.stopSequences
     # 说明：部分第三方客户端（如 SillyTavern）会携带 stop 字段；
     # Gemini 的 REST 接口不接受顶层 stop，但支持 generationConfig.stopSequences。
-    stop_value = getattr(request, "stop", None)
+    stop_value = (request.model_extra or {}).get("stop")
     if stop_value:
         if isinstance(stop_value, str):
             payload["generationConfig"]["stopSequences"] = [stop_value]
@@ -1148,7 +1159,7 @@ def gemini_json_process(response_json):
 async def fetch_gemini_response(client, url, headers, payload, model, timeout):
     """处理 Gemini 非流式响应"""
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_bytes, payload)
+    json_payload = json_dumps_bytes(payload)
     response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
     
     error_message = await check_response(response, "fetch_gemini_response")
@@ -1159,7 +1170,7 @@ async def fetch_gemini_response(client, url, headers, payload, model, timeout):
     response_bytes = await response.aread()
     if hasattr(response, "_content"):
         response._content = b""
-    response_json = await asyncio.to_thread(json_loads, response_bytes)
+    response_json = json_loads(response_bytes)
     response_bytes = None
 
     if isinstance(response_json, str):
@@ -1327,7 +1338,7 @@ async def fetch_gemini_response(client, url, headers, payload, model, timeout):
 async def fetch_gemini_response_stream(client, url, headers, payload, model, timeout):
     """处理 Gemini 流式响应"""
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_bytes, payload)
+    json_payload = json_dumps_bytes(payload)
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=timeout) as response:
         error_message = await check_response(response, "fetch_gemini_response_stream")
         if error_message:

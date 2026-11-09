@@ -386,7 +386,7 @@ async def fetch_response(
         file = payload.pop("file")
         response = await client.post(url, headers=headers, data=payload, files={"file": file}, timeout=timeout)
     else:
-        json_payload = await asyncio.to_thread(json_dumps_text, payload)
+        json_payload = json_dumps_text(payload)
         response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
     
     error_message = await check_response(response, "fetch_response_fallback")
@@ -407,7 +407,7 @@ async def fetch_response(
         yield response.read()
     else:
         response_bytes = await response.aread()
-        response_json = await asyncio.to_thread(json_loads, response_bytes)
+        response_json = json_loads(response_bytes)
         # 修改原因：默认 fallback 成功响应此前绕过 response_interceptors，新出站阶段也会因此遗漏。
         # 修改方式：在 yield 前统一调用 _apply_response_path_interceptors。
         # 目的：让无专用 channel adapter 的非流式成功响应也覆盖响应、渠道出站和 Key 出站阶段。

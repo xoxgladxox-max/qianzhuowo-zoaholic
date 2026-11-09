@@ -245,19 +245,32 @@ def get_engine(provider, endpoint=None, original_model=""):
 
     return engine, stream, stream_mode
 
-def get_proxy(proxy, client_config = {}):
-    if proxy:
-        # 解析代理URL
-        parsed = urlparse(proxy)
-        scheme = parsed.scheme.rstrip('h')
+def get_proxy(proxy, client_config=None):
+    if client_config is None:
+        client_config = {}
+    if not proxy:
+        return client_config
 
-        if scheme == 'socks5':
-            proxy = proxy.replace('socks5h://', 'socks5://')
-            transport = AsyncProxyTransport.from_url(proxy)
-            client_config["transport"] = transport
-            # print("proxy", proxy)
-        else:
-            client_config["proxy"] = proxy
+    parsed = urlparse(proxy)
+    raw_scheme = parsed.scheme.lower()
+    scheme = raw_scheme.rstrip("ha")
+
+    if scheme in ("socks5", "socks4"):
+        # 保留 socks5h / socks4a 的远端 DNS 解析语义 (rdns=True)
+        rdns = raw_scheme in ("socks5h", "socks4a")
+        normalized_proxy = (
+            proxy.replace("socks5h://", "socks5://", 1)
+            .replace("SOCKS5H://", "socks5://", 1)
+            .replace("socks4a://", "socks4://", 1)
+            .replace("SOCKS4A://", "socks4://", 1)
+        )
+        transport_kwargs = {"rdns": rdns}
+        for key in ("verify", "cert", "trust_env", "limits", "http2"):
+            if key in client_config:
+                transport_kwargs[key] = client_config[key]
+        client_config["transport"] = AsyncProxyTransport.from_url(normalized_proxy, **transport_kwargs)
+    else:
+        client_config["proxy"] = proxy
     return client_config
 
 

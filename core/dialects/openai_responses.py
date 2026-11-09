@@ -24,15 +24,90 @@ if TYPE_CHECKING:
 # ============================================================
 
 
+def _normalize_tool_arguments(raw_args: Any) -> str:
+    """将工具调用参数归一化为字符串。"""
+    if raw_args is None:
+        return "{}"
+    if isinstance(raw_args, str):
+        return raw_args
+    return json_dumps_text(raw_args, ensure_ascii=False)
+
+
+def _normalize_tool_output(output_val: Any) -> str:
+    """将工具调用输出归一化为字符串（兼容空字符串、None、对象、数组和长文本）。"""
+    if output_val is None:
+        return ""
+    if isinstance(output_val, str):
+        return output_val
+    return json_dumps_text(output_val, ensure_ascii=False)
+
+
+def _normalize_tool_call_entry(raw_tc: Dict[str, Any], fallback_id: str) -> Dict[str, Any]:
+    """将 Responses / Chat 风格的工具调用项归一化为标准 OpenAI tool_call 结构。"""
+    fn_obj = raw_tc.get("function")
+    if not isinstance(fn_obj, dict):
+        fn_obj = {}
+    call_id = raw_tc.get("call_id") or raw_tc.get("id") or fallback_id
+    raw_name = raw_tc.get("name") or fn_obj.get("name")
+    fn_name = str(raw_name) if raw_name is not None else ""
+    if raw_tc.get("arguments") is not None:
+        raw_args = raw_tc["arguments"]
+    elif fn_obj.get("arguments") is not None:
+        raw_args = fn_obj["arguments"]
+    else:
+        raw_args = raw_tc.get("input")
+    tc_dict: Dict[str, Any] = {
+        "id": str(call_id),
+        "type": "function",
+        "function": {
+            "name": fn_name,
+            "arguments": _normalize_tool_arguments(raw_args),
+        },
+    }
+    if raw_tc.get("extra_content"):
+        tc_dict["extra_content"] = raw_tc["extra_content"]
+    return tc_dict
+
+
+def _append_or_merge_assistant_tool_call(
+    messages: List[Dict[str, Any]],
+    tc_dict: Dict[str, Any],
+    pending_reasoning: str = "",
+) -> None:
+    """将工具调用合并到上一条 assistant 消息，若不存在则新建一条 assistant 消息。"""
+    if (
+        messages
+        and messages[-1].get("role") == "assistant"
+        and "tool_call_id" not in messages[-1]
+    ):
+        prev = messages[-1]
+        if prev.get("content") is None:
+            prev["content"] = ""
+        prev.setdefault("tool_calls", []).append(tc_dict)
+        if pending_reasoning and not prev.get("reasoning_content"):
+            prev["reasoning_content"] = pending_reasoning
+    else:
+        msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [tc_dict],
+        }
+        if pending_reasoning:
+            msg["reasoning_content"] = pending_reasoning
+        messages.append(msg)
+
+
 def convert_responses_input_to_messages(input_data: Union[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """
     将 Responses API 的 input 转换为 Chat Completions 的 messages 格式
 
     Responses API input 格式：
     - 字符串: 直接作为 user 消息
-    - 数组: 消息列表，每个消息包含 role 和 content
-      - content 可以是字符串或数组
-      - 数组中的 item 类型: input_text, input_image, input_audio 等
+    - 数组: 消息或事件项列表：
+      - 普通消息: 包含 role 和 content（字符串或数组，含 input_text / output_text / summary_text / input_image 等）
+      - 顶层工具调用: function_call / custom_tool_call -> assistant.tool_calls
+      - 顶层工具输出: function_call_output / custom_tool_call_output -> role="tool"
+      - 混排的 Chat 格式消息: assistant(tool_calls) / role="tool"
 
     Args:
         input_data: Responses API 的 input 字段
@@ -40,7 +115,7 @@ def convert_responses_input_to_messages(input_data: Union[str, List[Dict[str, An
     Returns:
         Chat Completions 格式的 messages 列表
     """
-    messages = []
+    messages: List[Dict[str, Any]] = []
 
     # 如果是字符串，直接作为 user 消息
     if isinstance(input_data, str):
@@ -48,98 +123,174 @@ def convert_responses_input_to_messages(input_data: Union[str, List[Dict[str, An
 
     # 如果是列表，逐个转换
     if isinstance(input_data, list):
+        call_seq = 0
+        pending_reasoning = ""
+
         for item in input_data:
             if isinstance(item, str):
                 # 字符串直接作为 user 消息
                 messages.append({"role": "user", "content": item})
-            elif isinstance(item, dict):
-                # Responses represents calls/results as separate input items, not messages.
-                if item.get("type") == "function_call":
-                    call = {"id": item.get("call_id") or item.get("id"), "type": "function",
-                            "function": {"name": item.get("name", ""),
-                                         "arguments": item.get("arguments", "{}")}}
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            top_type = item.get("type", "")
+
+            # 1. 顶层 reasoning 项：提取 summary_text 暂存，附加到紧随其后的 assistant 消息
+            if top_type == "reasoning":
+                summary_parts = []
+                for key in ("summary", "content"):
+                    blocks = item.get(key)
+                    if isinstance(blocks, list):
+                        for block in blocks:
+                            if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]:
+                                summary_parts.append(block["text"])
+                if summary_parts:
+                    reasoning_text = "".join(summary_parts)
                     if messages and messages[-1].get("role") == "assistant":
-                        messages[-1].setdefault("tool_calls", []).append(call)
+                        prev_rc = messages[-1].get("reasoning_content")
+                        messages[-1]["reasoning_content"] = (
+                            f"{prev_rc}{reasoning_text}" if isinstance(prev_rc, str) and prev_rc else reasoning_text
+                        )
                     else:
-                        messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    continue
-                if item.get("type") == "function_call_output":
-                    output = item.get("output", "")
-                    messages.append({"role": "tool", "tool_call_id": item.get("call_id"),
-                                     "content": output if isinstance(output, str) else json_dumps_text(output)})
-                    continue
-                role = item.get("role", "user")
-                content = item.get("content")
+                        pending_reasoning = f"{pending_reasoning}{reasoning_text}"
+                continue
 
-                # 处理 content
-                if content is None:
-                    continue
+            # 2. 顶层 function_call / custom_tool_call -> assistant.tool_calls
+            if top_type in ("function_call", "custom_tool_call"):
+                fallback_id = f"call_{call_seq}"
+                call_seq += 1
+                tc_dict = _normalize_tool_call_entry(item, fallback_id)
+                _append_or_merge_assistant_tool_call(messages, tc_dict, pending_reasoning)
+                pending_reasoning = ""
+                continue
 
-                if isinstance(content, str):
-                    # 字符串 content 直接使用
-                    messages.append({"role": role, "content": content})
-                elif isinstance(content, list):
-                    # 数组 content，需要转换 type
-                    converted_content = []
-                    for content_item in content:
-                        if isinstance(content_item, str):
-                            converted_content.append({"type": "text", "text": content_item})
-                        elif isinstance(content_item, dict):
-                            item_type = content_item.get("type", "")
+            role = item.get("role", "user")
+            content = item.get("content")
 
-                            # input_text -> text
-                            if item_type in ("input_text", "output_text"):
+            # 3. 顶层 function_call_output / custom_tool_call_output 或混排的 Chat 格式 role="tool" 消息 -> role="tool"
+            if (
+                top_type in ("function_call_output", "custom_tool_call_output")
+                or role == "tool"
+                or (item.get("tool_call_id") and top_type != "message")
+            ):
+                call_id = item.get("call_id") or item.get("tool_call_id") or item.get("id") or f"call_{call_seq}"
+                call_seq += 1
+                raw_output = item.get("output") if "output" in item else content
+                tool_msg: Dict[str, Any] = {
+                    "role": "tool",
+                    "tool_call_id": str(call_id),
+                    "content": _normalize_tool_output(raw_output),
+                }
+                if item.get("name"):
+                    tool_msg["name"] = str(item["name"])
+                messages.append(tool_msg)
+                continue
+
+            # 提取消息自身可能携带的 Chat 格式 tool_calls
+            inline_tool_calls: List[Dict[str, Any]] = []
+            if isinstance(item.get("tool_calls"), list):
+                for raw_tc in item["tool_calls"]:
+                    if isinstance(raw_tc, dict):
+                        fallback_id = f"call_{call_seq}"
+                        call_seq += 1
+                        inline_tool_calls.append(_normalize_tool_call_entry(raw_tc, fallback_id))
+
+            # 处理 content
+            converted_msg: Optional[Dict[str, Any]] = None
+            if content is None:
+                if inline_tool_calls:
+                    converted_msg = {
+                        "role": role,
+                        "content": "",
+                        "tool_calls": inline_tool_calls,
+                    }
+            elif isinstance(content, str):
+                # 字符串 content 直接使用
+                converted_msg = {"role": role, "content": content}
+                if inline_tool_calls:
+                    converted_msg["tool_calls"] = inline_tool_calls
+            elif isinstance(content, list):
+                # 数组 content，需要转换 type
+                converted_content = []
+                for content_item in content:
+                    if isinstance(content_item, str):
+                        converted_content.append({"type": "text", "text": content_item})
+                    elif isinstance(content_item, dict):
+                        item_type = content_item.get("type", "")
+
+                        # input_text / output_text / text / summary_text -> text
+                        if item_type in ("input_text", "output_text", "text", "summary_text"):
+                            text_val = content_item.get("text", "")
+                            if text_val is not None and text_val != "":
                                 converted_content.append({
                                     "type": "text",
-                                    "text": content_item.get("text", "")
+                                    "text": text_val
                                 })
-                            # input_image -> image_url
-                            elif item_type == "input_image":
-                                image_url = content_item.get("image_url") or content_item.get("url")
-                                if image_url:
-                                    converted_content.append({
-                                        "type": "image_url",
-                                        "image_url": {"url": image_url}
-                                    })
-                            # input_audio -> file
-                            elif item_type == "input_audio":
-                                data = content_item.get("input_audio", {}).get("data", "")
-                                if data:
-                                    converted_content.append({
-                                        "type": "file",
-                                        "file": {"mime_type": "audio/wav", "data": data}
-                                    })
-                            # input_file -> file
-                            elif item_type == "input_file":
-                                file_obj = {}
-                                for field in ["file_id", "filename", "file_url", "file_data"]:
-                                    val = content_item.get(field)
-                                    if val is not None:
-                                        if field == "file_url" or (field == "file_data" and str(val).startswith("data:")):
-                                            file_obj["url"] = val
-                                        elif field == "file_data":
-                                            file_obj["data"] = val
-                                        else:
-                                            file_obj[field] = val
+                        # message.content 内嵌的 tool_use / function_call / custom_tool_call
+                        elif item_type in ("tool_use", "function_call", "custom_tool_call"):
+                            fallback_id = f"call_{call_seq}"
+                            call_seq += 1
+                            inline_tool_calls.append(_normalize_tool_call_entry(content_item, fallback_id))
+                        # input_image -> image_url
+                        elif item_type == "input_image":
+                            image_url = content_item.get("image_url") or content_item.get("url")
+                            if isinstance(image_url, dict):
+                                image_url = image_url.get("url")
+                            if image_url:
+                                converted_content.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": image_url}
+                                })
+                        # input_audio -> file
+                        elif item_type == "input_audio":
+                            data = content_item.get("input_audio", {}).get("data", "")
+                            if data:
                                 converted_content.append({
                                     "type": "file",
-                                    "file": file_obj
+                                    "file": {"mime_type": "audio/wav", "data": data}
                                 })
-                            # 其他类型原样传递
-                            else:
-                                # 尝试保留原有格式（如 text, image_url）
-                                if item_type == "text":
-                                    converted_content.append(content_item)
-                                elif item_type == "image_url":
-                                    converted_content.append(content_item)
-                                else:
-                                    converted_content.append(content_item)
+                        # input_file -> file
+                        elif item_type == "input_file":
+                            file_obj = {}
+                            for field in ["file_id", "filename", "file_url", "file_data"]:
+                                val = content_item.get(field)
+                                if val is not None:
+                                    if field == "file_url" or (field == "file_data" and str(val).startswith("data:")):
+                                        file_obj["url"] = val
+                                    elif field == "file_data":
+                                        file_obj["data"] = val
+                                    else:
+                                        file_obj[field] = val
+                            converted_content.append({
+                                "type": "file",
+                                "file": file_obj
+                            })
+                        # 其他类型原样传递
+                        else:
+                            converted_content.append(content_item)
 
-                    if converted_content:
-                        messages.append({"role": role, "content": converted_content})
-                else:
-                    # 其他类型尝试转为字符串
-                    messages.append({"role": role, "content": str(content)})
+                if converted_content or inline_tool_calls:
+                    converted_msg = {
+                        "role": role,
+                        "content": converted_content if converted_content else "",
+                    }
+                    if inline_tool_calls:
+                        converted_msg["tool_calls"] = inline_tool_calls
+            else:
+                # 其他类型尝试转为字符串
+                converted_msg = {"role": role, "content": str(content)}
+                if inline_tool_calls:
+                    converted_msg["tool_calls"] = inline_tool_calls
+
+            if converted_msg is not None:
+                if role == "assistant" and pending_reasoning:
+                    converted_msg["reasoning_content"] = pending_reasoning
+                    pending_reasoning = ""
+                if item.get("reasoning_content") and not converted_msg.get("reasoning_content"):
+                    converted_msg["reasoning_content"] = item["reasoning_content"]
+                messages.append(converted_msg)
 
     return messages
 
@@ -197,9 +348,6 @@ def convert_responses_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[L
             # 其他类型原样传递
             converted_tools.append(tool)
 
-    for source, converted in zip(tools, converted_tools):
-        if "strict" in source and isinstance(converted.get("function"), dict):
-            converted["function"]["strict"] = source["strict"]
     return converted_tools if converted_tools else None
 
 
@@ -262,11 +410,6 @@ async def parse_responses_request(
             else:
                 request_data[field] = native_body[field]
 
-    if isinstance(request_data.get("tool_choice"), dict):
-        choice = request_data["tool_choice"]
-        if choice.get("type") == "function" and "name" in choice:
-            request_data["tool_choice"] = {"type": "function", "function": {"name": choice["name"]}}
-
     # text.format -> response_format
     text_format = native_body.get("text", {}).get("format")
     if text_format:
@@ -294,9 +437,6 @@ def _responses_usage_from_canonical(usage: Any) -> Dict[str, Any]:
     cache_usage = extract_cache_usage(usage)
     if cache_usage["cached_tokens"] > 0:
         response_usage["input_tokens_details"] = {"cached_tokens": cache_usage["cached_tokens"]}
-    details = usage.get("completion_tokens_details") or {}
-    if "reasoning_tokens" in details:
-        response_usage["output_tokens_details"] = {"reasoning_tokens": details["reasoning_tokens"]}
     return response_usage
 
 
@@ -323,32 +463,118 @@ async def render_responses_response(
         ]
     }
     """
-    # Make explicit re-rendering safe, including native failed Responses objects.
-    if canonical_response.get("object") == "response" or canonical_response.get("error"):
-        return canonical_response
-    from .responses_stream import ResponsesStreamRenderer
-    renderer = ResponsesStreamRenderer(model)
-    choices = canonical_response.get("choices") or []
-    if not choices:
-        renderer.finish(error={"code": "empty_response", "message": "Upstream returned no choices"})
-        return renderer.response
-    choice = choices[0]
-    message = dict(choice.get("message") or {})
-    message["tool_calls"] = [dict(call, index=index)
-                             for index, call in enumerate(message.get("tool_calls") or [])]
-    renderer.feed({"choices": [{"index": 0, "delta": message,
-                                "finish_reason": choice.get("finish_reason") or "stop"}],
-                   "usage": canonical_response.get("usage")})
-    renderer.finish()
-    return renderer.response
+    import random
+    import string
+    from datetime import datetime
+
+    timestamp = int(datetime.timestamp(datetime.now()))
+    random.seed(timestamp)
+
+    # 生成响应 ID
+    resp_id = "resp_" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
+
+    output = []
+
+    # 检查是否有 reasoning 内容
+    choices = canonical_response.get("choices", [])
+    if choices:
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        reasoning_content = message.get("reasoning_content", "")
+        tool_calls = message.get("tool_calls", [])
+
+        # 如果有 reasoning_content，添加 reasoning item
+        if reasoning_content:
+            reasoning_id = "rs_" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
+            output.append({
+                "id": reasoning_id,
+                "type": "reasoning",
+                "content": [],
+                "summary": [{"type": "summary_text", "text": reasoning_content}]
+            })
+
+        # 添加 message item
+        msg_id = "msg_" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
+        message_item = {
+            "id": msg_id,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": []
+        }
+
+        if content:
+            if isinstance(content, list):
+                # 结构化 content list → Responses output items
+                for ci in content:
+                    if not isinstance(ci, dict):
+                        continue
+                    ci_type = ci.get("type", "")
+                    if ci_type == "text":
+                        text_val = ci.get("text", "")
+                        if text_val:
+                            message_item["content"].append({
+                                "type": "output_text",
+                                "text": text_val,
+                                "annotations": []
+                            })
+                    elif ci_type == "image_url":
+                        image_url = ci.get("image_url")
+                        url = ""
+                        if isinstance(image_url, dict):
+                            url = image_url.get("url", "")
+                        elif isinstance(image_url, str):
+                            url = image_url
+                        if url:
+                            # Responses API 没有标准的 image output，
+                            # 降级为 markdown 文本
+                            message_item["content"].append({
+                                "type": "output_text",
+                                "text": f"![image]({url})",
+                                "annotations": []
+                            })
+            else:
+                message_item["content"].append({
+                    "type": "output_text",
+                    "text": content,
+                    "annotations": []
+                })
+
+        # 处理 tool_calls
+        if tool_calls:
+            for tc in tool_calls:
+                tc_id = "call_" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=24))
+                message_item["content"].append({
+                    "type": "tool_use",
+                    "id": tc.get("id", tc_id),
+                    "name": tc.get("function", {}).get("name", ""),
+                    "arguments": tc.get("function", {}).get("arguments", "{}")
+                })
+
+        if message_item["content"]:
+            output.append(message_item)
+
+    # 构建响应
+    response = {
+        "id": resp_id,
+        "object": "response",
+        "created_at": timestamp,
+        "model": model,
+        "output": output,
+        "status": "completed"
+    }
+
+    # 添加 usage
+    usage = canonical_response.get("usage")
+    if usage:
+        # Responses 方言出口需要把 OAI 缓存命中字段转为 input_tokens_details.cached_tokens。
+        response["usage"] = _responses_usage_from_canonical(usage)
+
+    return response
 
 
 async def render_responses_stream(canonical_sse_chunk: str) -> str:
     """
-    Legacy single-chunk callback. Production HTTP/WS Responses routes use
-    responses_stream.render_responses_iterator with request-scoped state; this
-    compatibility callback cannot reconstruct tool calls across chunks.
-
     将 Canonical SSE 流转换为 Responses API 流格式
 
     Chat Completions 流事件:

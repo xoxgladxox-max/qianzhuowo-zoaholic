@@ -22,13 +22,36 @@ _PRICE_URL = "https://www.llm-prices.com/current-v1.json"
 _fetching_lock = asyncio.Lock()
 
 
+import re as _re_price_tag
+
+
+def strip_upstream_context_tag(model_name: str, allow_channel_prefix: bool = False) -> str:
+    """剥离模型名中的 <上游>-<上下文>- 标签（如 az-400k-gpt-6-astra -> gpt-6-astra）。"""
+    if not model_name:
+        return model_name
+    stripped = _re_price_tag.sub(
+        r'^(?:az|aws|vx|ais|oai|ant|off|4t)-\d+(?:\.\d+)?[km]-',
+        '',
+        model_name,
+        flags=_re_price_tag.I,
+    )
+    if stripped != model_name or not allow_channel_prefix:
+        return stripped
+    return _re_price_tag.sub(
+        r'^[a-z0-9_]+-(?:az|aws|vx|ais|oai|ant|off|4t)-\d+(?:\.\d+)?[km]-',
+        '',
+        model_name,
+        flags=_re_price_tag.I,
+    )
+
+
 def _normalize_model_id(model_id: str) -> str:
-    """标准化模型 ID：小写，去除常见前缀"""
+    """标准化模型 ID：小写，去除常见前缀及 <上游>-<上下文>- 标签"""
     s = model_id.lower().strip()
     # 去除 provider 前缀（openai/xxx, anthropic/xxx 等）
     if "/" in s:
         s = s.split("/", 1)[-1]
-    return s
+    return strip_upstream_context_tag(s, allow_channel_prefix=True)
 
 
 def _build_index(prices_list: list) -> dict:

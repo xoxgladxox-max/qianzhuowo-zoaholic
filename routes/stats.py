@@ -1699,7 +1699,7 @@ async def get_model_trend(
     hours: Optional[int] = Query(default=24, ge=1, le=8760),
     provider: Optional[str] = None,
     model: Optional[str] = None,
-    granularity: Optional[str] = Query(default=None, regex='^(hour|day)$'),
+    granularity: Optional[str] = Query(default=None, pattern='^(hour|day)$'),
 ):
     """
     获取筛选模型的时间趋势数据，用于折线图展示。

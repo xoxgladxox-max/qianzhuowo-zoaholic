@@ -220,7 +220,7 @@ async def _fetch_passthrough_stream(
         pool=10.0,
     )
     
-    json_payload = await asyncio.to_thread(json_dumps_bytes, payload)
+    json_payload = json_dumps_bytes(payload)
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=stream_timeout) as response:
         error_message = await check_response(response, "passthrough_stream")
         if error_message:
@@ -275,7 +275,7 @@ async def _fetch_passthrough_response(
     import time as _time
     t0 = _time.time()
     
-    json_payload = await asyncio.to_thread(json_dumps_bytes, payload)
+    json_payload = json_dumps_bytes(payload)
     t1 = _time.time()
     logger.debug(f"[passthrough] json.dumps took {t1-t0:.3f}s")
     

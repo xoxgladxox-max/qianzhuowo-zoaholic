@@ -290,7 +290,8 @@ async def get_aws_payload(request, engine, provider, api_key=None):
     if request.tools and not is_tools_disabled(provider):
         tools = []
         for tool in request.tools:
-            json_tool = await gpt2claude_tools_json(tool.dict()["function"])
+            tool_dict = tool if isinstance(tool, dict) else tool.model_dump()
+            json_tool = await gpt2claude_tools_json(tool_dict["function"])
             tools.append(json_tool)
         payload["tools"] = tools
         if "tool_choice" in payload:

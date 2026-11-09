@@ -447,10 +447,12 @@ async def get_claude_payload(request, engine, provider, api_key=None):
         tools = payload.get("tools", [])  # 保留已有的工具（如插件添加的）
         for tool in request.tools:
             # 检查是否已经是 Claude 服务器端工具格式（如 web_search_20250305）
-            if hasattr(tool, 'dict'):
-                tool_dict = tool.dict()
+            if isinstance(tool, dict):
+                tool_dict = tool
+            elif hasattr(tool, "model_dump"):
+                tool_dict = tool.model_dump()
             else:
-                tool_dict = tool if isinstance(tool, dict) else {}
+                tool_dict = {}
 
             # 服务器端工具的 type 包含日期后缀，直接保留
             tool_type = tool_dict.get("type", "")
@@ -514,7 +516,7 @@ async def get_claude_payload(request, engine, provider, api_key=None):
 async def fetch_claude_response(client, url, headers, payload, model, timeout):
     """处理 Claude 非流式响应"""
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
 
     error_message = await check_response(response, "fetch_claude_response")
@@ -523,7 +525,7 @@ async def fetch_claude_response(client, url, headers, payload, model, timeout):
         return
 
     response_bytes = await response.aread()
-    response_json = await asyncio.to_thread(json_loads, response_bytes)
+    response_json = json_loads(response_bytes)
     mark_adapter_metrics_managed()
 
     # 遍历 content 数组，提取文本内容和客户端工具调用
@@ -620,7 +622,7 @@ async def fetch_claude_response(client, url, headers, payload, model, timeout):
 async def fetch_claude_response_stream(client, url, headers, payload, model, timeout):
     """处理 Claude 流式响应"""
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=timeout) as response:
         error_message = await check_response(response, "fetch_claude_response_stream")
         if error_message:
