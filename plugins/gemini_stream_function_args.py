@@ -254,8 +254,23 @@ async def gemini_stream_function_args_request_interceptor(
         ):
             return url, headers, payload
 
+        # 1) 严格检查当前渠道是否在 enabled_plugins 中启用了本插件
+        prefs = provider.get("preferences") if isinstance(provider.get("preferences"), dict) else {}
+        enabled_list = prefs.get("enabled_plugins") if isinstance(prefs.get("enabled_plugins"), list) else []
+        is_plugin_enabled = any(
+            isinstance(item, str) and item.split(":", 1)[0].strip() == PLUGIN_NAME
+            for item in enabled_list
+        )
+        if not is_plugin_enabled:
+            return url, headers, payload
+
         has_decl, has_synthetic = _has_function_declarations(payload)
         if not has_decl:
+            return url, headers, payload
+
+        # 2) streamFunctionCallArguments 的 partialArgs 仅对单字符串合成隧道工具 (has_synthetic) 安全；
+        #    对于客户端原生复杂嵌套数组工具（如 edit.hunks[].oldContent），开启会导致二级网关整包缓冲或嵌套数组组装残缺。
+        if not has_synthetic:
             return url, headers, payload
 
         # 判断是否为 /v1beta 原生透传请求（检查调用栈是否来自 passthrough.py）
