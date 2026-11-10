@@ -1237,17 +1237,11 @@ def apply_uuau_tunnel(
             kept = list(scan.kept or [])
             clean_visible_prefill = _sanitize_prefill_text(scan.text)
             has_prefill_target = True
-        elif options.auto_prefill:
+        elif options.auto_prefill and not has_real_client_tools:
             cleaned, _ = strip_trailing_zero_width(contents, True)
             kept = list(cleaned)
-            # 在携带真实客户端工具时（如 VS Code Agent），不注入可见的大猫文本预填，保持 clean_visible_prefill 为单空格或空
-            if has_real_client_tools:
-                clean_visible_prefill = " "
-                # 对于非 WAA 渠道或 Pool 1 (GenerateContent) 渠道，即使有客户端工具也必须开启 tail 目标以构建合法尾部
-                has_prefill_target = True
-            else:
-                clean_visible_prefill = DEFAULT_UUAU_PREFILL
-                has_prefill_target = True
+            clean_visible_prefill = DEFAULT_UUAU_PREFILL
+            has_prefill_target = True
         else:
             cleaned, _ = strip_trailing_zero_width(contents, True)
             kept = list(cleaned)
