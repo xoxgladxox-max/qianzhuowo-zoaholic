@@ -1258,8 +1258,6 @@ def apply_uuau_tunnel(
     #    注意：在 Vertex/SAP 渠道携带客户端真实工具（has_real_client_tools）时，保留历史轮原生签名以 100% 命中 Context Cache
     if options.strip_sig and not (has_real_client_tools and not is_waa):
         _strip_history_thought_signatures_gemini(kept)
-
-    is_waa = (channel_profile == "waa") or ("generativelanguage.googleapis.com" in str(url or "").lower())
     # WAA / AI Studio Build 不支持 streamFunctionCallArguments，若开启合成工具会导致整包缓冲并触发 First-Frame Flush Gate；
     # 因此 WAA 下除非用户显式强制指定 use_tool=true，否则默认关闭合成工具，直接走 KV 真硬预填充 0 延迟逐字流式
     if is_waa and not options.use_tool_explicit:
@@ -1569,10 +1567,7 @@ def apply_uuau_tunnel(
                     new_contents.append({"role": "user", "parts": tail_thought_parts})
         elif has_real_client_tools:
             # 带真实工具（如 VS Code LimCode Agent）：使用 U2(thought:true) 自毁尾块压制 E3 并稀释 E2，
-            # 同时挂载工具轮专用免审思维导语：
-            # 1) 破除 functionResponse 返回 R18 文本后的 content_filter；
-            # 2) 要求调用工具前先输出 1 句简短纯文本进度说明（5 秒内打通流式首包 HTTP 200 响应头，彻底破除 Cloudflare 100s 524 超时）；
-            # 3) 要求 edit 仅替换需修改的目标局部段落，避免单次生成 7000+ tokens 全文 hunk 导致超时或截断。
+            # 同时挂载免审思维导语，破除 functionResponse 返回 R18 文本后的 content_filter
             tail_u2_parts_tools: List[Dict[str, Any]] = []
             if options.dilute:
                 tail_u2_parts_tools.append({"text": STEALTH_DILUTION_TEXT, "thought": True})
