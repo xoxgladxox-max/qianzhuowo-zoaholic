@@ -484,7 +484,11 @@ async def _stream_gemini_with_partial_args(client, url, headers, payload, model,
                         has_function_call = True
                         cur_idx = tc_index
                         tc_index += 1
-                        call_id = f"call_{fc_id}" if fc_id else f"call_{uuid4().hex[:24]}"
+                        if fc_id:
+                            fc_id_str = str(fc_id)
+                            call_id = fc_id_str if fc_id_str.startswith("call_") else f"call_{fc_id_str}"
+                        else:
+                            call_id = f"call_{uuid4().hex[:24]}"
 
                         # 先发工具调用头帧（含 name 和 thoughtSignature）
                         mark_content_start()
@@ -494,9 +498,14 @@ async def _stream_gemini_with_partial_args(client, url, headers, payload, model,
                             tool_call_index=cur_idx,
                         )
 
-                        # 若是传统原子调用（直接带完整 args 且无 willContinue）
-                        if fc_args is not None and not will_continue and not partial_args:
-                            args_str = fc_args if isinstance(fc_args, str) else json_dumps_text(fc_args, ensure_ascii=False)
+                        # 若是传统原子调用（直接带完整 args 或无参调用且无 willContinue）
+                        if not will_continue and not partial_args:
+                            if fc_args is None:
+                                args_str = "{}"
+                            elif isinstance(fc_args, str):
+                                args_str = "{}" if (not fc_args.strip() or fc_args.strip() == "null") else fc_args
+                            else:
+                                args_str = json_dumps_text(fc_args, ensure_ascii=False)
                             yield await generate_sse_response(
                                 timestamp, model, content=None, tools_id=call_id,
                                 function_call_name=None, function_call_content=args_str,

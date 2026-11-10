@@ -1128,6 +1128,8 @@ def gemini_json_process(response_json):
         if "functionCall" in part:
             current_function_call_name = safe_get(part, "functionCall", "name", default=None)
             current_function_full_response = safe_get(part, "functionCall", "args", default=None)
+            if current_function_full_response is None:
+                current_function_full_response = {}
             if current_function_call_name:
                 function_calls_list.append({
                     "name": current_function_call_name,
@@ -1313,8 +1315,12 @@ async def fetch_gemini_response(client, url, headers, payload, model, timeout):
         tool_calls_list = []
         for function_index, function_call in enumerate(function_calls_list):
             arguments = function_call.get("args")
+            if arguments is None:
+                arguments = {}
             if not isinstance(arguments, str):
                 arguments = json_dumps_text(arguments, ensure_ascii=False)
+            elif arguments.strip() == "null" or not arguments.strip():
+                arguments = "{}"
             tool_call = {
                 "index": function_index,
                 "id": f"call_{uuid4().hex[:24]}",
@@ -1473,8 +1479,12 @@ async def fetch_gemini_response_stream(client, url, headers, payload, model, tim
                 tc_index += 1
                 function_call_id = f"call_{uuid4().hex[:24]}"
                 function_full_response = function_call.get("args")
+                if function_full_response is None:
+                    function_full_response = {}
                 if not isinstance(function_full_response, str):
                     function_full_response = json_dumps_text(function_full_response, ensure_ascii=False)
+                elif function_full_response.strip() == "null" or not function_full_response.strip():
+                    function_full_response = "{}"
                 mark_content_start()
                 sse_string = await generate_sse_response(
                     timestamp, model, content=None, tools_id=function_call_id,
